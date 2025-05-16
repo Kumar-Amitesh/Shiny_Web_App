@@ -6,7 +6,7 @@ output: html_document
 ---
 
 ## Databse
-```{r eval=FALSE}
+```{r}
 library(DBI)
 library(RSQLite)
 
@@ -28,7 +28,7 @@ dbDisconnect(db)
 ```
 
 ## Server
-```{r eval=FALSE}
+```{r}
 library(plumber)
 library(DBI)
 library(RSQLite)
@@ -86,7 +86,7 @@ function(id) {
 ```
 
 ## Run Server
-```{r eval=FALSE}
+```{r}
 library(plumber)
 
 r<-plumb("server.R")
@@ -95,7 +95,7 @@ r$run(port=8000,swagger=TRUE)
 
 
 ## Shiny Application
-```{r eval=FALSE}
+```{r}
 library(shiny)
 library(shinythemes)
 library(httr)
