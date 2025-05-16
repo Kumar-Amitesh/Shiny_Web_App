@@ -146,8 +146,7 @@ Modular, maintainable, and scalable architecture makes this ideal for news data 
 
 ---
 
-## 🖼️ Screenshots (Descriptions)
-
+## Descriptions
 
 1. **Dashboard Overview** — UI with filters and visualizations
 2. **Sentiment Histogram** — Frequency of sentiment scores
