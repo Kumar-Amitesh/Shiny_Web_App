@@ -1,0 +1,909 @@
+---
+title: "Shiny_Web_App"
+author: "Amitesh"
+date: "2025-03-30"
+output: html_document
+---
+
+## Databse
+```{r eval=FALSE}
+library(DBI)
+library(RSQLite)
+
+# Connect to SQLite database (or create it if not exists)
+db <- dbConnect(RSQLite::SQLite(), "news_database.sqlite")
+
+# Read CSV dataset
+df <- read.csv("enriched_data.csv")
+
+# Write data into SQLite table
+dbWriteTable(db, "news_data", df, overwrite = TRUE, row.names = FALSE)
+
+# Verify data was inserted
+dbGetQuery(db, "SELECT COUNT(*) FROM news_data")
+
+# Close connection
+dbDisconnect(db)
+
+```
+
+## Server
+```{r eval=FALSE}
+library(plumber)
+library(DBI)
+library(RSQLite)
+
+#* @apiTitle News API Server
+
+# Connect to the SQLite database
+db <- dbConnect(RSQLite::SQLite(), "news_database.sqlite")
+
+#* Get all news articles
+#* @get /news
+function() {
+  dbGetQuery(db, "SELECT * FROM news_data")
+}
+
+#* Get news by category
+#* @get /news/category/<category>
+function(category) {
+  query <- sprintf("SELECT * FROM news_data WHERE category = '%s'", category)
+  dbGetQuery(db, query)
+}
+
+#* Add a new news article
+#* @post /news
+function(source, headline, category, link, text, domain, word_count, sentiment_score, keywords) {
+  query <- sprintf(
+    "INSERT INTO news_data (source, headline, category, link, text, domain, word_count, sentiment_score, keywords) 
+    VALUES ('%s', '%s', '%s', '%s', '%s', '%s', %d, %d, '%s')",
+    source, headline, category, link, text, domain, as.integer(word_count), as.integer(sentiment_score), keywords
+  )
+  dbExecute(db, query)
+  return(list(status = "News added successfully"))
+}
+
+#* Update a news article by ID
+#* @put /news/<id>
+function(id, headline = NULL, category = NULL) {
+  query <- sprintf(
+    "UPDATE news_data SET headline = COALESCE('%s', headline), category = COALESCE('%s', category) WHERE rowid = %d",
+    headline, category, as.integer(id)
+  )
+  dbExecute(db, query)
+  return(list(status = "News updated successfully"))
+}
+
+#* Delete a news article by ID
+#* @delete /news/<id>
+function(id) {
+  query <- sprintf("DELETE FROM news_data WHERE rowid = %d", as.integer(id))
+  dbExecute(db, query)
+  return(list(status = "News deleted successfully"))
+}
+
+
+```
+
+## Run Server
+```{r eval=FALSE}
+library(plumber)
+
+r<-plumb("server.R")
+r$run(port=8000,swagger=TRUE)
+```
+
+
+## Shiny Application
+```{r eval=FALSE}
+library(shiny)
+library(shinythemes)
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(lubridate)
+
+# UI
+ui <- fluidPage(
+  theme = shinytheme("yeti"),
+  tags$head(
+    tags$style(HTML("
+      .sidebar-toggle {
+        cursor: pointer;
+        padding: 10px;
+        background-color: #f8f9fa;
+        border: 1px solid #ddd;
+        font-size: 20px;
+        position: fixed;
+        z-index: 1000;
+        left: 0;
+        top: 0;
+      }
+      .title-panel {
+        text-align: center;
+        color: #2c3e50;
+        padding: 15px;
+      }
+      .section-header {
+        background-color: #2c3e50;
+        color: white;
+        padding: 10px;
+        margin-top: 10px;
+        cursor: pointer;
+        border-radius: 5px;
+      }
+      .float-right {
+        float: right;
+      }
+      .sidebar {
+        position: fixed;
+        top: 60px;
+        left: 5px;
+        bottom: 0;
+        width: 300px;
+        overflow-y: auto;
+        z-index: 999;
+        background-color: white;
+        box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+        transition: transform 0.3s ease;
+      }
+      .sidebar-collapsed {
+        transform: translateX(-100%);
+      }
+      .sidebar-expanded {
+        transform: translateX(0);
+      }
+      .main-content {
+        transition: margin-left 0.3s ease;
+        width: 100%;
+      }
+      .main-expanded {
+        margin-left: 0;
+      }
+      .main-collapsed {
+        margin-left: 300px;
+      }
+      .news-card {
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        padding: 15px;
+        margin-bottom: 15px;
+        background-color: #f9f9f9;
+      }
+      .news-title {
+        font-weight: bold;
+        font-size: 16px;
+        margin-bottom: 5px;
+      }
+      .news-meta {
+        color: #666;
+        font-size: 12px;
+        margin-bottom: 10px;
+      }
+      .news-text {
+        font-size: 14px;
+      }
+      .btn-block {
+        display: block;
+        width: 100%;
+      }
+      /* Add some padding to the body to prevent content from being hidden behind the toggle */
+      body {
+        padding-left: 40px;
+      }
+    "))
+  ),
+  
+  div(class = "sidebar-toggle", HTML("&#9776;"), onclick = "toggleSidebar()"),
+  
+  div(id = "sidebar", class = "sidebar sidebar-collapsed",
+      div(id = "data-view-section", class = "section-header", "Data View Options",
+          tags$span(id = "toggle-data-view", class = "float-right", HTML("&#9660;")), onclick = "toggleSection('data-view-content')"),
+      div(id = "data-view-content",
+          radioButtons("data_view", "Show:", 
+                       choices = c("All Data with Visualization", "All Data", "Only Visualizations"), 
+                       selected = "All Data with Visualization")
+      ),
+      
+      div(id = "filter-section", class = "section-header", "Filter News",
+          tags$span(id = "toggle-filter", class = "float-right", HTML("&#9660;")), onclick = "toggleSection('filter-content')"),
+      div(id = "filter-content",
+          selectInput("date_filter", "Select Date", choices = "All"),
+          sliderInput("sentiment_range", "Filter by Sentiment Score", min = -10, max = 10, value = c(-10, 10)),
+          selectInput("time_filter", "Filter by Time of Day", choices = c("All", "Morning (5-12)", "Afternoon (12-18)", "Evening (18-5)"))
+      ),
+      
+      div(id = "fetch-section", class = "section-header", "Fetch News",
+          tags$span(id = "toggle-fetch", class = "float-right", HTML("&#9660;")), onclick = "toggleSection('fetch-content')"),
+      div(id = "fetch-content",
+          textInput("category_filter", "Filter by Category", ""),
+          actionButton("fetch_news", "Fetch News", class = "btn-primary btn-block")
+      ),
+      
+      div(id = "manage-section", class = "section-header", "Manage News",
+          tags$span(id = "toggle-manage", class = "float-right", HTML("&#9660;")), onclick = "toggleSection('manage-content')"),
+      div(id = "manage-content",
+          tabsetPanel(
+            tabPanel("Add News",
+                     textInput("new_source", "Source"),
+                     textInput("new_headline", "Headline"),
+                     textInput("new_category", "Category"),
+                     textInput("new_link", "Link"),
+                     textAreaInput("new_text", "Text"),
+                     textInput("new_domain", "Domain"),
+                     numericInput("new_word_count", "Word Count", value = 100, min = 0),
+                     sliderInput("new_sentiment_score", "Sentiment Score", min = -10, max = 10, value = 0),
+                     textInput("new_keywords", "Keywords (comma separated)"),
+                     actionButton("add_news", "Add News", class = "btn-success btn-block")
+            ),
+            tabPanel("Update News",
+                     numericInput("update_id", "News ID", value = 1, min = 1),
+                     textInput("update_headline", "New Headline"),
+                     textInput("update_category", "New Category"),
+                     actionButton("update_news", "Update News", class = "btn-warning btn-block")
+            ),
+            tabPanel("Delete News",
+                     numericInput("delete_id", "News ID", value = 1, min = 1),
+                     actionButton("delete_news", "Delete News", class = "btn-danger btn-block")
+            )
+          )
+      )
+  ),
+  
+  div(id = "main-panel", class = "main-content main-expanded",
+      titlePanel("News Management Dashboard"),
+      
+      conditionalPanel(
+        condition = "input.category_filter == ''",
+        h3("Latest News by Category"),
+        uiOutput("latest_news_cards")
+      ),
+      
+      conditionalPanel(
+        condition = "input.data_view != 'Only Visualizations'",
+        h3("News Data"),
+        div(
+          style = "margin-top: 20px;",
+          dataTableOutput("news_table")
+        )
+      ),
+      
+      conditionalPanel(
+        condition = "input.data_view != 'All Data'",
+        h3("Visualizations"),
+        div(
+          style = "display: grid; grid-template-columns: 1fr 1fr; gap: 20px;",
+          div(plotOutput("sentiment_plot")),
+          div(plotOutput("category_distribution")),
+          div(plotOutput("sentiment_density")),
+          div(plotOutput("top_authors")),
+          div(plotOutput("sentiment_by_category")),
+          div(plotOutput("sentiment_over_time")),
+          div(plotOutput("top_sources_sentiment")),
+          div(plotOutput("word_count_vs_sentiment"))
+        ),
+        conditionalPanel(
+          condition = "input.category_filter == ''",
+          div(
+            style = "margin-top: 20px;",
+            plotOutput("heatmap_sentiment")
+          )
+        )
+      )
+  ),
+  
+  tags$script(HTML("
+    function toggleSidebar() {
+      var sidebar = document.getElementById('sidebar');
+      var mainPanel = document.getElementById('main-panel');
+      
+      if (sidebar.classList.contains('sidebar-expanded')) {
+        sidebar.classList.remove('sidebar-expanded');
+        sidebar.classList.add('sidebar-collapsed');
+        mainPanel.classList.remove('main-collapsed');
+        mainPanel.classList.add('main-expanded');
+      } else {
+        sidebar.classList.remove('sidebar-collapsed');
+        sidebar.classList.add('sidebar-expanded');
+        mainPanel.classList.remove('main-expanded');
+        mainPanel.classList.add('main-collapsed');
+      }
+    }
+
+    function toggleSection(contentId) {
+      var content = document.getElementById(contentId);
+      var toggleIcon = event.currentTarget.querySelector('span');
+      
+      if (content.style.display === 'none' || !content.style.display) {
+        content.style.display = 'block';
+        toggleIcon.innerHTML = '&#9660;';
+      } else {
+        content.style.display = 'none';
+        toggleIcon.innerHTML = '&#9658;';
+      }
+    }
+    
+    // Initialize sections to be visible but sidebar to be collapsed
+    document.addEventListener('DOMContentLoaded', function() {
+      ['data-view-content', 'filter-content', 'fetch-content', 'manage-content'].forEach(function(id) {
+        document.getElementById(id).style.display = 'block';
+      });
+    });
+  "))
+)
+
+
+
+
+# Server
+server <- function(input, output, session) {
+  # Base URL for API
+  api_base_url <- "http://localhost:8000" 
+  
+  # Initialize reactive values with proper columns
+  news_data <- reactiveVal(data.frame(
+    source = character(),
+    author = character(),
+    headline = character(),
+    category = character(),
+    date = as.Date(character()),
+    time = character(),
+    link = character(),
+    text = character(),
+    domain = character(),
+    word_count = integer(),
+    sentiment_score = numeric(),
+    keywords = character()
+  ))
+  
+  latest_news_data <- reactiveVal(data.frame(
+    source = character(),
+    author = character(),
+    headline = character(),
+    category = character(),
+    date = as.Date(character()),
+    time = character(),
+    link = character(),
+    text = character(),
+    domain = character(),
+    word_count = integer(),
+    sentiment_score = numeric(),
+    keywords = character()
+  ))
+  
+  # Fixed createMockData function (retained as fallback)
+  createMockData <- function(n = 20) {
+    categories <- c("Politics", "Business", "Technology", "Health", "Entertainment", "Sports", "Science")
+    sources <- c("CNN", "BBC", "Reuters", "New York Times", "Washington Post", "Fox News", "The Guardian")
+    authors <- c("John Smith", "Jane Doe", "Robert Johnson", "Emily Davis", "Michael Brown", "Sarah Wilson")
+    
+    sample_size <- min(n, length(categories))
+    
+    data.frame(
+      source = sample(sources, n, replace = TRUE),
+      author = sample(authors, n, replace = TRUE),
+      headline = paste("News Headline", 1:n),
+      category = sample(categories, n, replace = TRUE),
+      date = sample(seq(as.Date('2023-01-01'), as.Date('2023-12-31'), by = "day"), n, replace = TRUE),
+      time = format(sample(seq(as.POSIXct("00:00:00", format = "%H:%M:%S"), 
+                               as.POSIXct("23:59:59", format = "%H:%M:%S"), 
+                               by = "1 hour"), n, replace = TRUE), "%H:%M:%S"),
+      link = paste0("https://example.com/news/", 1:n),
+      text = paste("This is the news content for article", 1:n, 
+                   "containing details about the", 
+                   sample(c("recent events", "new discovery", "political development"), n, replace = TRUE)),
+      domain = "example.com",
+      word_count = sample(200:1500, n, replace = TRUE),
+      sentiment_score = round(rnorm(n, mean = 0, sd = 3), 1),
+      keywords = sapply(1:n, function(x) paste(sample(c("politics", "economy", "tech", "health", "sports", "science", "world"), 
+                                                      sample(2:5, 1), replace = TRUE), collapse = ", "))
+    )
+  }
+  
+  # FetchNews with API connection
+  fetchNews <- function(category = NULL) {
+    tryCatch({
+      # API endpoints
+      if(is.null(category) || category == "") {
+        endpoint <- paste0(api_base_url, "/news")
+      } else {
+        endpoint <- paste0(api_base_url, "/news/category/", URLencode(category))
+      }
+      
+      # Make API request
+      response <- httr::GET(endpoint)
+      
+      # Check if request was successful
+      if(httr::status_code(response) == 200) {
+        data <- httr::content(response, "parsed", "application/json")
+        
+        # Convert list to data frame
+        if(length(data) > 0) {
+          data <- do.call(rbind, lapply(data, as.data.frame))
+        } else {
+          # Return empty data frame with correct structure
+          return(createMockData(0))
+        }
+      } else {
+        # Handle API error, fall back to mock data
+        showNotification(paste("API Error:", httr::http_status(response)$message), type = "error")
+        return(createMockData(10))
+      }
+      
+      # Ensure all required columns exist
+      required_cols <- c("source", "author", "headline", "category", "date", "time", 
+                         "link", "text", "domain", "word_count", "sentiment_score", "keywords")
+      
+      for (col in required_cols) {
+        if (!col %in% names(data)) {
+          data[[col]] <- NA
+        }
+      }
+      
+      return(data)
+      
+    }, error = function(e) {
+      showNotification(paste("Error fetching news:", e$message), type = "error")
+      return(createMockData(10))  # Return mock data on error
+    })
+  }
+  
+  # Initial data load with proper column checking
+  observe({
+    tryCatch({
+      data <- fetchNews()
+      
+      # Ensure date is in proper format
+      if ("date" %in% names(data)) {
+        data$date <- as.Date(data$date)
+      }
+      
+      news_data(data)
+      
+      # Get latest news by category
+      if (nrow(data) > 0 && "category" %in% names(data) && "date" %in% names(data)) {
+        latest <- data %>%
+          group_by(category) %>%
+          arrange(desc(date)) %>%
+          slice(1) %>%
+          ungroup()
+        
+        
+        latest_news_data(latest)
+      }
+      
+      # Update date filter choices
+      if (nrow(data) > 0 && "date" %in% names(data)) {
+        dates <- sort(unique(as.character(data$date)), decreasing = TRUE)
+        updateSelectInput(session, "date_filter", choices = c("All", dates))
+      }
+    }, error = function(e) {
+      showNotification(paste("Initialization error:", e$message), type = "error")
+    })
+  })
+  
+  # Filtered news with proper column checking
+  filtered_news <- reactive({
+    req(news_data())
+    data <- news_data()
+    
+    # Ensure required columns exist
+    required_cols <- c("date", "sentiment_score", "time")
+    for (col in required_cols) {
+      if (!col %in% names(data)) {
+        data[[col]] <- NA
+      }
+    }
+    
+    # Apply category filter
+    if(input$category_filter!=""){
+      category <- input$category_filter
+      data<-data %>% filter(as.character(category)==input$category_filter)
+    }
+    
+    # Apply date filter
+    if (input$date_filter != "" && input$date_filter != "All") {
+      data <- data %>% filter(as.character(date) == input$date_filter)
+    }
+    
+    # Apply sentiment filter
+    if ("sentiment_score" %in% names(data)) {
+      data <- data %>% 
+        filter(sentiment_score >= input$sentiment_range[1] & 
+                 sentiment_score <= input$sentiment_range[2])
+    }
+    
+    # Apply time of day filter
+    if (input$time_filter != "All" && "time" %in% names(data)) {
+      hour <- as.numeric(substr(data$time, 1, 2))
+      
+      data <- data %>% filter(
+        case_when(
+          input$time_filter == "Morning (5-12)" ~ hour >= 5 & hour < 12,
+          input$time_filter == "Afternoon (12-18)" ~ hour >= 12 & hour < 18,
+          input$time_filter == "Evening (18-5)" ~ hour >= 18 | hour < 5,
+          TRUE ~ TRUE
+        )
+      )
+    }
+    
+    return(data)
+  })
+  
+  # News table
+  output$news_table <- renderDataTable({
+    data <- filtered_news()
+    
+    # Simplify text for display
+    if (nrow(data) > 0 && "text" %in% names(data)) {
+      data$text <- sapply(data$text, function(x) {
+        sentences <- unlist(strsplit(x, "(?<=[.!?])\\s+", perl = TRUE))
+        paste0(substr(paste(sentences[1], collapse = " "), 1, 150), "...")
+      })
+    }
+    
+    datatable(
+      data,
+      options = list(
+        pageLength = 10,
+        scrollX = TRUE,
+        autoWidth = TRUE,
+        columnDefs = list(
+          list(targets = which(names(data) == "text"), width = "300px"),
+          list(targets = "_all", className = "dt-center")
+        )
+      ),
+      rownames = FALSE,
+      class = "display compact"
+    )
+  })
+  
+  # Visualization: Sentiment distribution
+  output$sentiment_plot <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0)
+    
+    ggplot(data, aes(x = sentiment_score)) +
+      geom_histogram(fill = "steelblue", bins = 20, color = "white") +
+      geom_vline(xintercept = mean(data$sentiment_score, na.rm = TRUE), 
+                 color = "red", linetype = "dashed") +
+      labs(title = "Distribution of Sentiment Scores",
+           x = "Sentiment Score",
+           y = "Count") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+  })
+  
+  # Visualization: Category distribution
+  output$category_distribution <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0)
+    
+    category_counts <- data %>%
+      count(category) %>%
+      arrange(desc(n)) %>%
+      mutate(category = factor(category, levels = category))
+    
+    ggplot(category_counts, aes(x = category, y = n, fill = category)) +
+      geom_bar(stat = "identity") +
+      labs(title = "News by Category",
+           x = "",
+           y = "Number of Articles") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            plot.title = element_text(hjust = 0.5),
+            legend.position = "none") +
+      scale_fill_brewer(palette = "Set3")
+  })
+  
+  # Visualization: Sentiment density
+  output$sentiment_density <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0)
+    
+    ggplot(data, aes(x = sentiment_score, fill = category)) +
+      geom_density(alpha = 0.5) +
+      labs(title = "Sentiment Score Density by Category",
+           x = "Sentiment Score",
+           y = "Density") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+  })
+  
+  # Visualization: Top authors
+  output$top_authors <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0 && "author" %in% names(data))
+    
+    top_authors <- data %>%
+      count(author, sort = TRUE) %>%
+      head(10) %>%
+      mutate(author = factor(author, levels = author))
+    
+    ggplot(top_authors, aes(x = author, y = n)) +
+      geom_bar(stat = "identity", fill = "darkorange") +
+      coord_flip() +
+      labs(title = "Top Authors by Article Count",
+           x = "",
+           y = "Number of Articles") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+  })
+  
+  # Visualization: Sentiment by category
+  output$sentiment_by_category <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0)
+    
+    ggplot(data, aes(x = category, y = sentiment_score, fill = category)) +
+      geom_boxplot() +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+      labs(title = "Sentiment Scores by Category",
+           x = "",
+           y = "Sentiment Score") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            plot.title = element_text(hjust = 0.5),
+            legend.position = "none") +
+      scale_fill_brewer(palette = "Pastel1")
+  })
+  
+  # Visualization: Sentiment over time
+  output$sentiment_over_time <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0)
+    
+    daily_sentiment <- data %>%
+      group_by(date) %>%
+      summarise(avg_sentiment = mean(sentiment_score, na.rm = TRUE))
+    
+    ggplot(daily_sentiment, aes(x = date, y = avg_sentiment)) +
+      geom_line(color = "steelblue") +
+      geom_point(color = "steelblue") +
+      geom_smooth(method = "loess", color = "red", se = FALSE) +
+      labs(title = "Average Sentiment Over Time",
+           x = "Date",
+           y = "Average Sentiment Score") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+  })
+  
+  # Visualization: Top sources by sentiment
+  output$top_sources_sentiment <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0)
+    
+    source_sentiment <- data %>%
+      group_by(source) %>%
+      summarise(avg_sentiment = mean(sentiment_score, na.rm = TRUE)) %>%
+      arrange(desc(avg_sentiment)) %>%
+      head(10) %>%
+      mutate(source = factor(source, levels = source))
+    
+    ggplot(source_sentiment, aes(x = source, y = avg_sentiment, fill = avg_sentiment > 0)) +
+      geom_bar(stat = "identity") +
+      coord_flip() +
+      labs(title = "Top Sources by Average Sentiment",
+           x = "",
+           y = "Average Sentiment Score") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5),
+            legend.position = "none") +
+      scale_fill_manual(values = c("TRUE" = "darkgreen", "FALSE" = "darkred"))
+  })
+  
+  # Visualization: Word count vs sentiment
+  output$word_count_vs_sentiment <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0)
+    
+    ggplot(data, aes(x = word_count, y = sentiment_score, color = category)) +
+      geom_point(alpha = 0.7) +
+      geom_smooth(method = "lm", se = FALSE, color = "black") +
+      labs(title = "Word Count vs. Sentiment Score",
+           x = "Word Count",
+           y = "Sentiment Score") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+  })
+  
+  # Visualization: Sentiment heatmap
+  output$heatmap_sentiment <- renderPlot({
+    data <- filtered_news()
+    req(nrow(data) > 0 && input$category_filter == "")
+    
+    heatmap_data <- data %>%
+      group_by(category, source) %>%
+      summarise(avg_sentiment = mean(sentiment_score, na.rm = TRUE), .groups = "drop")
+    
+    if (nrow(heatmap_data) >= 4 && length(unique(heatmap_data$category)) >= 2 && 
+        length(unique(heatmap_data$source)) >= 2) {
+      ggplot(heatmap_data, aes(x = source, y = category, fill = avg_sentiment)) +
+        geom_tile() +
+        scale_fill_gradient2(low = "red", mid = "white", high = "green", midpoint = 0) +
+        labs(title = "Sentiment Heatmap by Category and Source",
+             x = "Source",
+             y = "Category",
+             fill = "Avg. Sentiment") +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+              plot.title = element_text(hjust = 0.5))
+    } else {
+      ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "Not enough data for heatmap\n(need multiple categories and sources)") +
+        theme_void()
+    }
+  })
+  
+  # Add news functionality with API connection
+  observeEvent(input$add_news, {
+    tryCatch({
+      # Validate required fields
+      if (trimws(input$new_headline) == "" || trimws(input$new_category) == "") {
+        showNotification("Headline and Category are required fields", type = "error")
+        return()
+      }
+      
+      # Prepare data for API
+      new_article_data <- list(
+        source = ifelse(trimws(input$new_source) == "", "Unknown", input$new_source),
+        headline = input$new_headline,
+        category = input$new_category,
+        link = ifelse(trimws(input$new_link) == "", "", input$new_link),
+        text = input$new_text,
+        domain = ifelse(trimws(input$new_domain) == "", "user-added.com", input$new_domain),
+        word_count = input$new_word_count,
+        sentiment_score = input$new_sentiment_score,
+        keywords = input$new_keywords
+      )
+      
+      # Show loading notification
+      showNotification("Adding news article...", type = "message")
+      
+      # Send POST request to API
+      response <- httr::POST(
+        url = paste0(api_base_url, "/news"),
+        body = new_article_data,
+        encode = "form"
+      )
+      
+      # Check response
+      if (httr::status_code(response) == 200) {
+        # Refresh data after successful addition
+        refreshed_data <- fetchNews()
+        news_data(refreshed_data)
+        
+        # Update latest news
+        latest <- refreshed_data %>%
+          group_by(category) %>%
+          arrange(desc(date)) %>%
+          slice(1) %>%
+          ungroup()
+        latest_news_data(latest)
+        
+        # Clear form
+        updateTextInput(session, "new_source", value = "")
+        updateTextInput(session, "new_headline", value = "")
+        updateTextInput(session, "new_category", value = "")
+        updateTextInput(session, "new_link", value = "")
+        updateTextAreaInput(session, "new_text", value = "")
+        updateTextInput(session, "new_domain", value = "")
+        updateNumericInput(session, "new_word_count", value = 100)
+        updateSliderInput(session, "new_sentiment_score", value = 0)
+        updateTextInput(session, "new_keywords", value = "")
+        
+        showNotification("News article added successfully", type = "message")
+      } else {
+        showNotification(paste("API Error:", httr::http_status(response)$message), type = "error")
+      }
+    }, error = function(e) {
+      showNotification(paste("Error adding news:", e$message), type = "error")
+    })
+  })
+  
+  # Update news functionality with API connection
+  observeEvent(input$update_news, {
+    tryCatch({
+      req(input$update_id > 0)
+      
+      # Validate inputs
+      if (trimws(input$update_headline) == "" || trimws(input$update_category) == "") {
+        showNotification("Headline and Category are required fields", type = "error")
+        return()
+      }
+      
+      # Show loading notification
+      showNotification("Updating news article...", type = "message")
+      
+      # Send PUT request to API
+      response <- httr::PUT(
+        url = paste0(api_base_url, "/news/", input$update_id),
+        body = list(
+          headline = input$update_headline,
+          category = input$update_category
+        ),
+        encode = "form"
+      )
+      
+      # Check response
+      if (httr::status_code(response) == 200) {
+        # Refresh data after successful update
+        refreshed_data <- fetchNews()
+        news_data(refreshed_data)
+        
+        # Update latest news if needed
+        latest <- refreshed_data %>%
+          group_by(category) %>%
+          arrange(desc(date)) %>%
+          slice(1) %>%
+          ungroup()
+        latest_news_data(latest)
+        
+        showNotification("News article updated successfully", type = "message")
+      } else {
+        showNotification(paste("API Error:", httr::http_status(response)$message), type = "error")
+      }
+    }, error = function(e) {
+      showNotification(paste("Error updating news:", e$message), type = "error")
+    })
+  })
+  
+  # Delete news functionality with API connection
+  observeEvent(input$delete_news, {
+    showModal(modalDialog(
+      title = "Confirm Deletion",
+      paste("Are you sure you want to delete article with ID", input$delete_id, "?"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_delete", "Delete", class = "btn-danger")
+      ),
+      easyClose = TRUE
+    ))
+  })
+  
+  observeEvent(input$confirm_delete, {
+    tryCatch({
+      req(input$delete_id > 0)
+      
+      # Show loading notification
+      showNotification("Deleting news article...", type = "message")
+      
+      # Send DELETE request to API
+      response <- httr::DELETE(
+        url = paste0(api_base_url, "/news/", input$delete_id)
+      )
+      
+      # Check response
+      if (httr::status_code(response) == 200) {
+        # Refresh data after successful deletion
+        refreshed_data <- fetchNews()
+        news_data(refreshed_data)
+        
+        # Update latest news
+        latest <- refreshed_data %>%
+          group_by(category) %>%
+          arrange(desc(date)) %>%
+          slice(1) %>%
+          ungroup()
+        latest_news_data(latest)
+        
+        showNotification("News article deleted successfully", type = "message")
+        removeModal()
+      } else {
+        showNotification(paste("API Error:", httr::http_status(response)$message), type = "error")
+        removeModal()
+      }
+    }, error = function(e) {
+      showNotification(paste("Error deleting news:", e$message), type = "error")
+      removeModal()
+    })
+  })
+}
+
+# Run the application
+shinyApp(ui = ui, server = server)
+```
+
